@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Connect Wallet – Ganache Aware</title>
+  <!-- Correct ethers.js include -->
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 700px; }
+    .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    button { padding: 0.6rem 1rem; border-radius: 6px; cursor: pointer; }
+    #warn { color: #9a5a00; margin-top: 10px; }
+    #ok { color: #0a7a2f; margin-top: 10px; }
+  </style>
+</head>
+
+<body>
+  <h1>Connect Wallet Test (Ganache-aware)</h1>
+
+  <button id="btnConnect">Connect Wallet</button>
+  <button id="btnFix" style="display:none;">Switch/Add Ganache</button>
+
+  <div id="status" class="mono" style="margin-top:10px;">Not connected</div>
+  <div id="addr"   class="mono"></div>
+  <div id="net"    class="mono"></div>
+  <div id="warn"   class="mono"></div>
+  <div id="ok"     class="mono"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let provider, signer;
+
+    // Edit these if your Ganache differs:
+    const GANACHE_RPC_URL = "http://127.0.0.1:7545";
+    const GANACHE_CANDIDATE_CHAIN_IDS = [1337, 5777];      // accept either
+    // We’ll try to switch/add to this preferred one if mismatch:
+    const PREFERRED_GANACHE_CHAIN_ID = 1337;               // set to 5777 if that’s your case
+    const PREFERRED_GANACHE_CHAIN_ID_HEX = "0x" + PREFERRED_GANACHE_CHAIN_ID.toString(16);
+
+    function chainIdToHex(dec) { return "0x" + Number(dec).toString(16); }
+
+    async function ensureGanacheNetwork() {
+      if (!window.ethereum) throw new Error("MetaMask not detected");
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: PREFERRED_GANACHE_CHAIN_ID_HEX }]
+        });
+        $("ok").textContent = `Switched to Ganache (chainId ${PREFERRED_GANACHE_CHAIN_ID}).`;
+        $("warn").textContent = "";
+      } catch (e) {
+        // If the chain hasn’t been added, add it
+        if (e.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: PREFERRED_GANACHE_CHAIN_ID_HEX,
+              chainName: "Ganache Local",
+              rpcUrls: [GANACHE_RPC_URL],
+              nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+              blockExplorerUrls: []
+            }]
+          });
+          $("ok").textContent = `Added Ganache (chainId ${PREFERRED_GANACHE_CHAIN_ID}) and switched.`;
+          $("warn").textContent = "";
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    async function connectWallet() {
+      try {
+        $("ok").textContent = "";
+        $("warn").textContent = "";
+
+        if (!window.ethereum) {
+          alert("MetaMask not detected. Please install it.");
+          return;
+        }
+
+        // Request accounts first
+        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+        if (!accounts || accounts.length === 0) {
+          $("status").textContent = "No accounts returned";
+          return;
+        }
+
+        // Wire ethers
+        provider = new ethers.providers.Web3Provider(window.ethereum);
+        signer = provider.getSigner();
+
+        const addr = await signer.getAddress();
+        const net = await provider.getNetwork();
+
+        $("status").textContent = "Connected ✅";
+        $("addr").textContent   = "Address: " + addr;
+        $("net").textContent    = `Network: ${net.name || "(custom)"} (chainId ${net.chainId})`;
+
+        // If we are not on a Ganache-like chain, offer to switch/add
+        if (!GANACHE_CANDIDATE_CHAIN_IDS.includes(Number(net.chainId))) {
+          $("warn").textContent = `Connected to chainId ${net.chainId}, which is not Ganache (1337/5777).`;
+          $("btnFix").style.display = "inline-block";
+        } else {
+          $("ok").textContent = `Looks good: Ganache chainId detected (${net.chainId}).`;
+          $("btnFix").style.display = "none";
+        }
+
+        // React to changes
+        ethereum.on("accountsChanged", () => location.reload());
+        ethereum.on("chainChanged", () => location.reload());
+      } catch (err) {
+        console.error(err);
+        $("status").textContent = "Connect failed: " + (err.message || err);
+      }
+    }
+
+    // Button to switch/add Ganache if needed
+    async function fixNetwork() {
+      try {
+        await ensureGanacheNetwork();
+        // Re-run connect to refresh UI to the new network
+        await connectWallet();
+      } catch (e) {
+        console.error(e);
+        $("warn").textContent = "Could not switch/add Ganache: " + (e.message || e);
+      }
+    }
+
+    $("btnConnect").addEventListener("click", connectWallet);
+    $("btnFix").addEventListener("click", fixNetwork);
+  </script>
+</body>
+</html>

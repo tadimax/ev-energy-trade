@@ -1,0 +1,110 @@
+% =========================
+% EV Stop Phase (with deadline + replay guard)
+% =========================
+
+hash_function h.
+public_key_function pk.
+
+% -------------------------
+% Driver
+% -------------------------
+role driver(D, S, C: agent, chain, contract: text) played_by D
+def=
+  local
+    sid: nonce,        % fresh sessionId
+    kwh: text,         % kWhMilli as text
+    deadline: text,    % just modeled as text; it’s bound into the signature
+    sig: message
+  init
+    state := 0
+  transition
+    1. state = 0 -> state' := 1
+       % Driver begins; inform C that sid exists (models "session open")
+       kwh' := "5000";           % example payload; attacker can see/alter on network
+       deadline' := "1700000000";% example unix time as text; tool won’t check time,
+                                 % but we bind it cryptographically into the signature.
+       kwh := kwh'; deadline := deadline';
+       send_!1(D, C, start(D,S,sid))
+
+    2. state = 1 /\ recv_!2(S, D, sig) -> state' := 2
+       % Station sent signature
+       request(D, S, auth_stop, sid.kwh.deadline)
+       send_!3(D, C, stop(D,S,sid,kwh,chain,contract,deadline,sig))
+end role
+
+% -------------------------
+% Station (signs typed data)
+% -------------------------
+role station(S, D, C: agent, chain, contract: text; skS: private_key) played_by S
+def=
+  local
+    sid: text,
+    kwh: text,
+    deadline: text,
+    sig: message
+  init
+    state := 0
+  transition
+    1. state = 0 /\ recv_!1(D, S, start(D,S,sid)) -> state' := 1
+       % Choose/confirm delivered energy and deadline locally
+       kwh' := new();           % Station decides kWhMilli
+       deadline' := new();      % Station decides deadline
+       kwh := kwh'; deadline := deadline';
+
+       % Bind *all* tuple fields like EIP-712:
+       %   (user, station, sessionId, kWhMilli, chainId, contractAddr, deadline)
+       witness(S, D, auth_stop, sid.kwh.deadline)
+       sig := { <D,S,sid,kwh,chain,contract,deadline> }_skS
+       send_!2(S, D, sig)
+end role
+
+% -------------------------
+% Contract (verifies + replay guard)
+% -------------------------
+role contract(C, D, S: agent, chain, contract: text; pkS: public_key) played_by C
+def=
+  local
+    sid_seen: text,      % remembers the sid that was started
+    kwh: text
+    chainR, contractR, deadlineR: text
+    sig: message
+  init
+    state := 0
+  transition
+    % Record an opened session
+    1. state = 0 /\ recv_!1(D, C, start(D,S,sid_seen)) -> state' := 1
+
+    % Accept exactly one stop for that sid (simple replay guard):
+    2. state = 1 /\ recv_!3(D, C, stop(D,S,sid_seen,kwh,chainR,contractR,deadlineR,sig)) -> state' := 2
+       % Signature verification under Station’s public key:
+       % In Dolev-Yao, using pkS to "open" {..}_skS models signature verification.
+       % Also check that chain/contract/deadline are the same tuple that S signed (they are, because the term is bound).
+       request(C, S, auth_stop, sid_seen.kwh.deadlineR)
+end role
+
+% -------------------------
+% System composition
+% -------------------------
+role session() def=
+  local
+    D, S, C: agent
+    chain, contract: text
+    skS: private_key
+  init
+    D := alice; S := bob; C := server;
+    chain := "1337"; contract := "0xCONTRACT";
+  composition
+    driver(D,S,C,chain,contract)
+  /\ station(S,D,C,chain,contract,skS)
+  /\ contract(C,D,S,chain,contract,pk(skS))
+end role
+
+% -------------------------
+% Goals
+% -------------------------
+goal
+  % Non-injective agreement on the tuple including the deadline
+  authentication_on auth_stop
+end goal
+
+environment()

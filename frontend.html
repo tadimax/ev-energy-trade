@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>EV Charging Sessions DApp</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+  <style>
+    :root { --border:#ddd; --muted:#666; --ok:#0a7a2f; --warn:#a95b00; }
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 1100px; }
+    h1 { margin-bottom: .25rem; }
+    .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+    button { padding: .6rem 1rem; border-radius: 6px; border: 1px solid #333; cursor: pointer; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .col { flex: 1 1 320px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .muted { color: var(--muted); }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    input[type="text"], input[type="number"] { padding: .5rem; width: 100%; box-sizing: border-box; }
+    label { display:block; margin-top:.6rem; font-size: .95rem; }
+    .kv { display:flex; align-items:center; gap:.5rem; }
+    .copy { font-size:.8rem; padding:.25rem .5rem; }
+    .small { font-size:.9rem; }
+    .dim { opacity:.7 }
+  </style>
+</head>
+<body>
+  <h1>EV Charging Sessions</h1>
+  <div class="muted">
+    Uses <span class="mono">contract-info.json</span>. Mode: <strong>Option A</strong> — Station signs, <strong>Driver submits & pays gas</strong>.
+  </div>
+
+  <!-- Connection -->
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <div class="row" style="gap:.5rem; align-items:center;">
+          <button id="btnConnect">Connect Wallet</button>
+          <button id="btnPick" class="small">Pick Accounts…</button>
+          <button id="btnFix" class="small" style="display:none;">Switch/Add Ganache</button>
+        </div>
+        <div id="connStatus" class="mono muted" style="margin-top:8px;">Not connected</div>
+        <div id="netStatus" class="mono muted"></div>
+        <div id="warn" class="mono warn"></div>
+        <div id="ok" class="mono ok"></div>
+      </div>
+      <div class="col">
+        <div class="kv"><strong>Contract:</strong> <span id="contractAddr" class="mono">—</span> <button class="copy" data-copy="contractAddr">Copy</button></div>
+        <div class="kv"><strong>Owner:</strong> <span id="ownerAddr" class="mono">—</span> <button class="copy" data-copy="ownerAddr">Copy</button></div>
+        <div><strong>Contract Balance:</strong> <span id="contractBal">—</span></div>
+      </div>
+      <div class="col">
+        <div class="kv"><strong>Your Address (active):</strong> <span id="userAddr" class="mono">—</span> <button class="copy" data-copy="userAddr">Copy</button></div>
+        <div class="kv"><strong>Connected Accounts:</strong> <span id="connectedList" class="mono">—</span></div>
+        <div><strong>Your Wallet Balance:</strong> <span id="userBal" class="mono">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- EV Session -->
+  <div class="card" id="evPanel">
+    <h3>Start / Stop Charging Session</h3>
+    <div class="muted small">
+      Start: driver sets station, deposit, session id.<br>
+      Stop: <strong>station signs</strong> (button below) → switch to <strong>driver</strong> → driver submits.
+    </div>
+
+    <div class="row" style="margin-top:8px;">
+      <div class="col">
+        <label>Station Address</label>
+        <input id="inpStation" type="text" placeholder="0xStation..." />
+
+        <div style="margin-top:12px;">
+          <button id="btnLoadStation">Load Station Info</button>
+          <div id="stationInfo" class="mono muted" style="margin-top:6px;">—</div>
+        </div>
+
+        <label style="margin-top:12px;">Deposit (ETH) — must be ≥ minDepositWei</label>
+        <input id="inpUpfrontEth" type="number" step="0.0001" min="0" placeholder="0.02" />
+
+        <label>Session ID (any string or 0x… bytes32)</label>
+        <input id="inpQuoteId" type="text" placeholder="session-1 or 0x..." />
+
+        <div style="margin-top:12px;">
+          <button id="btnStart">Start Session</button>
+        </div>
+      </div>
+
+      <div class="col">
+        <label>Driver Address (user who started the session)</label>
+        <input id="inpDriver" type="text" placeholder="0xDriverAddress..." />
+
+        <label>kWh Delivered (for stop)</label>
+        <input id="inpDelivered" type="number" step="0.1" min="0" placeholder="5.0" />
+
+        <div style="margin-top:12px;">
+          <button id="btnStop">Stop Session (Driver submits)</button>
+        </div>
+
+        <!-- Single station signature button -->
+        <div style="margin-top:12px;">
+          <label>Station Signature (0x…)</label>
+          <input id="inpStationSig" type="text" placeholder="0x…" class="mono" />
+          <button id="btnSignAsStation" class="small" title="Use while connected as the station account">
+            Sign as Station (auto-fills)
+          </button>
+          <div class="muted small" style="margin-top:6px;">
+            Tip: You don’t need to type the driver — we read it from-chain. Ensure MetaMask is on the <strong>station</strong> when signing.
+          </div>
+        </div>
+
+        <div class="mono muted" id="evStatus" style="margin-top:8px;">—</div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;">
+      <button id="btnTestTx">Send 0.000001 ETH to Contract (Test Tx)</button>
+      <div id="txStatus" class="mono muted" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <!-- Owner -->
+  <div class="card" id="ownerPanel" style="display:none;">
+    <h3>Owner</h3>
+
+    <div class="small muted" id="ownerGuardMsg" style="margin-bottom:6px;"></div>
+
+    <div style="margin-top:8px">
+      <label>Owner Set Station (price ETH)</label>
+      <input id="ownerStationAddr" type="text" placeholder="0xStation..." />
+      <input id="ownerStationPrice" type="number" step="0.0001" min="0" placeholder="0.0002" />
+      <button id="btnOwnerSetStation">Register/Update Station</button>
+    </div>
+    <div style="margin-top:12px;">
+      <button id="btnWithdraw">Withdraw Funds</button>
+      <div id="withdrawNote" class="mono muted" style="margin-top:6px; display:none;">This contract pays on <span class="mono">stopSession</span>; there’s no withdraw function.</div>
+    </div>
+  </div>
+
+  <!-- RSA demo -->
+  <div class="card">
+    <h3>Local Receipt Encryption (Browser RSA-OAEP)</h3>
+    <div class="muted">Encrypt the last tx hash locally; decrypt with your in-browser private key.</div>
+    <div style="margin-top:8px;">
+      <button id="btnGenKeys">Generate RSA Keys</button>
+      <button id="btnEncryptLast" disabled>Encrypt Last Tx</button>
+      <span id="keyStatus" class="mono muted" style="margin-left:8px;">No keys</span>
+    </div>
+    <div style="margin-top:8px;">
+      <button id="btnDecrypt" disabled>Decrypt Last Encrypted Receipt</button>
+      <div id="encPreview" class="mono muted" style="margin-top:8px;"></div>
+      <div id="decPreview" class="mono ok" style="margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <!-- Recent events -->
+  <div class="card">
+    <div class="kv" style="justify-content:space-between; align-items:baseline;">
+      <h3 style="margin:0;">Recent Events (last 5)</h3>
+      <button id="btnRefreshEvents" class="small">Refresh</button>
+    </div>
+    <div id="logList" class="mono">—</div>
+  </div>
+
+  <script>
+  // ---------- State ----------
+  let provider, signer, contract, currentUser = null;
+  let rsaKeyPair = null, lastEncrypted = null, lastTxHash = null;
+
+  // No default station to avoid wrong-account confusion
+  const DEFAULT_STATION = "";
+  const DOMAIN_NAME = "EVEnergy";
+  const DOMAIN_VERSION = "1";
+
+  // ---------- Helpers ----------
+  const $ = id => document.getElementById(id);
+  const fmtETH = wei => ethers.utils.formatEther(wei);
+  const toHexPreview = (buf) => "0x" + Array.from(new Uint8Array(buf)).slice(0, 24).map(b => b.toString(16).padStart(2, "0")).join("") + "...";
+  const fmtErr = (e) => e?.reason || e?.error?.message || e?.data?.message || e?.message || String(e);
+  const isAddr = (s) => { try { return ethers.utils.isAddress((s||"").trim()); } catch { return false; } };
+  const safeParseEther = (s) => { try { return ethers.utils.parseEther(String(s||"0")); } catch { return null; } };
+  const setBusy = (btn, busy=true) => { if (btn) btn.disabled = !!busy; };
+  const bn = (x) => ethers.BigNumber.from(x);
+  const weiFmt = (x) => ethers.utils.formatEther(x);
+  const LS = { get(k, d=""){ try { return localStorage.getItem(k) ?? d; } catch { return d; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
+  const setStatus = (msg) => $("evStatus").textContent = msg;
+
+  // Fresh active account (lowercased)
+  async function getActiveAccountLower() {
+    await provider.send("eth_requestAccounts", []);
+    const accounts = await provider.listAccounts();
+    return (accounts[0] || "").toLowerCase();
+  }
+
+  // Connected accounts list (lowercased)
+  async function getConnectedAccountsLower() {
+    try {
+      const accs = await ethereum.request({ method: "eth_accounts" });
+      return accs.map(a => a.toLowerCase());
+    } catch { return []; }
+  }
+
+  function toBytes32FromInput(val) {
+    const s = (val || "").trim();
+    if (s.startsWith("0x") && s.length === 66) return s;
+    return ethers.utils.keccak256(ethers.utils.toUtf8Bytes(s));
+  }
+
+  async function getSessionFromChain(sessionId) {
+    const s = await contract.sessions(sessionId);
+    const exists = s && s.user && s.user !== ethers.constants.AddressZero;
+    return exists ? s : null;
+  }
+
+  // Find latest open session for a station by scanning SessionStarted events
+  async function findLatestOpenSessionForStation(stationAddr) {
+    try {
+      const current = await provider.getBlockNumber();
+      const FROM_WINDOW = Math.max(0, current - 5000);
+      if (!contract.filters["SessionStarted"]) return null;
+      const filter = contract.filters["SessionStarted"]();
+      const evs = await contract.queryFilter(filter, FROM_WINDOW, current);
+      for (let i = evs.length - 1; i >= 0; i--) {
+        const ev = evs[i];
+        if (!ev.args) continue;
+        const evStation = (ev.args.station || ev.args[2] || "").toLowerCase();
+        if (evStation !== stationAddr.toLowerCase()) continue;
+        const sid = ev.args.sessionId || ev.args[0];
+        const sess = await contract.sessions(sid);
+        if (sess && sess.open) return { sessionId: sid, session: sess };
+      }
+    } catch (e) { console.error("findLatestOpenSessionForStation error:", e); }
+    return null;
+  }
+
+  function buildStopTypedData(sdata, chainId) {
+    return {
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" }
+        ],
+        SessionStop: [
+          { name: "user", type: "address" },
+          { name: "station", type: "address" },
+          { name: "sessionId", type: "bytes32" },
+          { name: "kWhMilli", type: "uint256" },
+          { name: "chainId", type: "uint256" },
+          { name: "contractAddr", type: "address" }
+        ]
+      },
+      primaryType: "SessionStop",
+      domain: { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, verifyingContract: contract.address },
+      message: sdata
+    };
+  }
+
+  function renderStopSummary(s) {
+    const lines = [
+      "✅ Charging session has concluded.",
+      `• Session ID: ${s.sessionId}`,
+      `• Delivered: ${(Number(s.kWhMilli)/1000).toFixed(3)} kWh`,
+      `• Price (locked at start): ${weiFmt(s.priceWei)} ETH / kWh`,
+      `• Charge Cost: ${weiFmt(s.costWei)} ETH`,
+      `• Deposit (at start): ${weiFmt(s.depositWei)} ETH`,
+      `• Payout to station: ${weiFmt(s.payoutWei)} ETH`,
+      `• Refund to driver: ${weiFmt(s.refundWei)} ETH`,
+      `• Station balance Δ: ${weiFmt(s.stationDelta)} ETH (before: ${weiFmt(s.balBefore)} → after: ${weiFmt(s.balAfter)})`,
+      `• Tx: ${s.txHash}`
+    ];
+    $("evStatus").innerHTML = lines.join("<br>");
+  }
+
+  // ---------- Load contract-info.json ----------
+  async function loadContractInfo() {
+    const res = await fetch("./contract-info.json");
+    if (!res.ok) throw new Error("Failed to load contract-info.json");
+    return res.json();
+  }
+
+  // ---------- Ganache helpers ----------
+  const GANACHE_RPC_URL = "http://127.0.0.1:7545";
+  const GANACHE_CHAINS = [1337, 5777];
+  const PREFERRED_CHAIN_HEX = "0x" + (1337).toString(16);
+
+  async function ensureGanacheNetwork() {
+    if (!window.ethereum) throw new Error("MetaMask not detected");
+    try {
+      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: PREFERRED_CHAIN_HEX }] });
+      $("ok").textContent = `Switched to Ganache (chainId 1337).`; $("warn").textContent = "";
+    } catch (e) {
+      if (e.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{ chainId: PREFERRED_CHAIN_HEX, chainName: "Ganache Local", rpcUrls: [GANACHE_RPC_URL], nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, blockExplorerUrls: [] }]
+        });
+        $("ok").textContent = `Added Ganache (1337) and switched.`; $("warn").textContent = "";
+      } else { throw e; }
+    }
+  }
+
+  // ---------- Pick accounts ----------
+  async function pickAccounts() {
+    if (!window.ethereum) return alert("MetaMask not detected.");
+    try {
+      await window.ethereum.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }]
+      });
+      $("ok").textContent = "Accounts permissions updated. Rebinding…";
+      await connect(); // rebind & refresh UI
+    } catch (e) {
+      $("warn").textContent = "Account permission request was cancelled or failed: " + fmtErr(e);
+    }
+  }
+
+  // ---------- Owner guard UI ----------
+  async function applyOwnerGuard() {
+    try {
+      if (!contract) return;
+      const owner = await contract.owner();
+      $("ownerAddr").textContent = owner;
+      const ownerLower = owner.toLowerCase();
+
+      const activeLower = await getActiveAccountLower();
+      const connectedLower = await getConnectedAccountsLower();
+
+      $("connectedList").textContent = connectedLower.length ? connectedLower.join(", ") : "—";
+
+      const isOwnerConnected = connectedLower.includes(ownerLower);
+
+      if (!isOwnerConnected) {
+        $("ownerGuardMsg").textContent = `Owner ${owner} is not connected to this site. Click "Pick Accounts" and include it.`;
+      } else if (activeLower !== ownerLower) {
+        $("ownerGuardMsg").textContent = `Owner is connected but not active. That's fine — owner-only txs will target ${owner}.`;
+      } else {
+        $("ownerGuardMsg").textContent = `Connected as owner — you can register/update stations.`;
+      }
+
+      const enable = isOwnerConnected;
+      $("btnOwnerSetStation").disabled = !enable;
+      $("ownerStationAddr").disabled = !enable;
+      $("ownerStationPrice").disabled = !enable;
+      document.getElementById("ownerPanel").classList.toggle("dim", !enable);
+    } catch (e) { console.error("applyOwnerGuard", e); }
+  }
+
+  // ---------- Connect ----------
+  async function connect() {
+    try {
+      $("ok").textContent = ""; $("warn").textContent = "";
+      if (!window.ethereum) return alert("MetaMask not detected.");
+
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      if (!accounts || accounts.length === 0) { $("connStatus").textContent = "No accounts returned"; return; }
+
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      signer = provider.getSigner();
+      currentUser = await signer.getAddress();
+      const net = await provider.getNetwork();
+
+      $("connStatus").textContent = "Connected";
+      $("userAddr").textContent = currentUser;
+      $("netStatus").textContent = `Network: ${net.name || "(custom)"} (chainId ${net.chainId})`;
+
+      const connectedLower = await getConnectedAccountsLower();
+      $("connectedList").textContent = connectedLower.length ? connectedLower.join(", ") : "—";
+
+      if (!GANACHE_CHAINS.includes(Number(net.chainId))) { $("warn").textContent = `Not on Ganache (1337/5777).`; $("btnFix").style.display = "inline-block"; }
+      else { $("ok").textContent = `Ganache chainId detected (${net.chainId}).`; $("btnFix").style.display = "none"; }
+
+      const { address, abi } = await loadContractInfo();
+      contract = new ethers.Contract(address, abi, signer);
+      $("contractAddr").textContent = address;
+
+      await refreshOwnerAndBalances();
+      await refreshUserWalletBalance();
+
+      if (contract.interface.functions["setStation(address,bool,uint256)"]) {
+        $("ownerPanel").style.display = "block";
+        $("ownerStationAddr").value = ""; // don't prefill
+        $("ownerStationPrice").value = "0.0002";
+        await applyOwnerGuard();
+      } else {
+        $("ownerPanel").style.display = "none";
+      }
+
+      const hasWithdraw =
+        contract.interface.functions["withdraw()"] ||
+        contract.interface.functions["ownerWithdraw()"] ||
+        contract.interface.functions["withdrawTo(address)"] ||
+        contract.interface.functions["withdraw(address)"] ||
+        contract.interface.functions["sweep()"] ||
+        contract.interface.functions["claim()"] ||
+        contract.interface.functions["collect()"];
+      if (!hasWithdraw) { $("btnWithdraw").disabled = true; $("withdrawNote").style.display = "block"; }
+
+      wireSessionEvents();
+
+      $("inpStation").value   = LS.get("inpStation", ""); // no default station
+      $("inpQuoteId").value   = LS.get("inpQuoteId", "session-1");
+      $("inpUpfrontEth").value= LS.get("inpUpfrontEth", "0.02");
+      $("inpDriver").value    = LS.get("inpDriver", "");
+
+      attachMMListeners(); // <-- non-destructive listeners (no reload)
+    } catch (e) { console.error(e); $("connStatus").textContent = "Connect failed: " + fmtErr(e); }
+  }
+
+  async function fixNetwork() { try { await ensureGanacheNetwork(); await connect(); } catch (e) { $("warn").textContent = "Could not switch/add Ganache: " + fmtErr(e); } }
+
+  // ---------- Non-reloading MetaMask listeners ----------
+  function attachMMListeners() {
+    if (!window.ethereum) return;
+    // avoid double attaching
+    if (window.ethereum._evHandlersAttached) return;
+    window.ethereum.on("accountsChanged", handleAccountsChanged);
+    window.ethereum.on("chainChanged", handleChainChanged);
+    window.ethereum._evHandlersAttached = true;
+  }
+
+  async function handleAccountsChanged(accs) {
+    try {
+      $("ok").textContent = "Account changed — rebinding…";
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      signer = provider.getSigner();
+      currentUser = await signer.getAddress().catch(() => null);
+      $("userAddr").textContent = currentUser || "—";
+      $("connectedList").textContent = (await getConnectedAccountsLower()).join(", ") || "—";
+      await refreshUserWalletBalance();
+      // re-point contract to the new signer (reads keep working; writes use active)
+      if (contract) contract = contract.connect(signer);
+      await applyOwnerGuard();
+      $("ok").textContent = "Ready.";
+    } catch (e) {
+      $("warn").textContent = "Account change handling failed: " + fmtErr(e);
+    }
+  }
+
+  async function handleChainChanged(chainIdHex) {
+    try {
+      $("ok").textContent = "Network changed — rebinding…";
+      provider = new ethers.providers.Web3Provider(window.ethereum);
+      signer = provider.getSigner();
+      currentUser = await signer.getAddress().catch(() => null);
+      const net = await provider.getNetwork();
+      $("userAddr").textContent = currentUser || "—";
+      $("netStatus").textContent = `Network: ${net.name || "(custom)"} (chainId ${net.chainId})`;
+      $("connectedList").textContent = (await getConnectedAccountsLower()).join(", ") || "—";
+
+      const { address, abi } = await loadContractInfo();
+      contract = new ethers.Contract(address, abi, signer);
+      $("contractAddr").textContent = address;
+
+      await refreshOwnerAndBalances();
+      await refreshUserWalletBalance();
+      await applyOwnerGuard();
+      wireSessionEvents();
+      $("ok").textContent = "Ready.";
+    } catch (e) {
+      $("warn").textContent = "Chain change handling failed: " + fmtErr(e);
+    }
+  }
+
+  // ---------- Info / balances ----------
+  async function refreshOwnerAndBalances() {
+    try {
+      if (!contract) return;
+      if (contract.interface.functions["owner()"]) $("ownerAddr").textContent = await contract.owner();
+      else $("ownerAddr").textContent = "(owner() not found)";
+      const bal = await provider.getBalance(contract.address);
+      $("contractBal").textContent = `${fmtETH(bal)} ETH`;
+    } catch (e) { console.error(e); }
+  }
+  async function refreshUserWalletBalance() {
+    try { if (!provider || !currentUser) return; $("userBal").textContent = `${fmtETH(await provider.getBalance(currentUser))} ETH`; }
+    catch (e) { console.error(e); }
+  }
+
+  // ---------- Events ----------
+  function wireSessionEvents() {
+    if (!contract || !contract.on) return;
+    ["SessionStarted","SessionSettled","SessionTimedOut","PriceUpdated","StationRegistered"].forEach(evt => {
+      if (contract.filters[evt]) contract.on(evt, async () => {
+        await refreshOwnerAndBalances();
+        await refreshUserWalletBalance();
+        await listRecentEvents();
+      });
+    });
+    listRecentEvents().catch(console.error);
+  }
+  async function listRecentEvents() {
+    if (!contract) { $("logList").textContent = "—"; return; }
+    const events = [], names = ["SessionStarted","SessionSettled","SessionTimedOut","PriceUpdated","StationRegistered"];
+    const current = await provider.getBlockNumber(), from = Math.max(0, current - 5000);
+    for (const n of names) { if (!contract.filters[n]) continue; const evs = await contract.queryFilter(contract.filters[n](), from, current); evs.forEach(e=>events.push({name:n,e})); }
+    events.sort((a,b)=>b.e.blockNumber-a.e.blockNumber);
+    $("logList").innerHTML = (events.slice(0,5).length?events.slice(0,5).map(({name,e},i)=>`#${i+1} ${name} | tx=${e.transactionHash} | block=${e.blockNumber} | ${(new Date()).toLocaleTimeString()}`).join("<br>"):"No recent events found.");
+  }
+
+  // ---------- Station info ----------
+  async function loadStationInfo() {
+    if (!contract) return alert("Connect first.");
+    try {
+      const station = ($("inpStation").value || "").trim();
+      if (!isAddr(station)) return alert("Enter a valid Station address (0x…).");
+      const okStation = await contract.isStation(station);
+      const price = await contract.priceWeiPerKWh(station);
+      const minDep = await contract.minDepositWei();
+      $("stationInfo").textContent = `isStation=${okStation} | priceWeiPerKWh=${price.toString()} (${fmtETH(price)} ETH) | minDepositWei=${minDep.toString()} (${fmtETH(minDep)} ETH)`;
+      LS.set("inpStation", station);
+    } catch (e) { console.error(e); $("stationInfo").textContent = fmtErr(e) || "Load failed"; }
+  }
+
+  // ---------- Owner: set station (targets owner, if connected) ----------
+  async function ownerSetStation() {
+    try {
+      if (!contract) return alert("Connect first.");
+      const owner = await contract.owner();
+      const ownerLower = owner.toLowerCase();
+      const connectedLower = await getConnectedAccountsLower();
+
+      if (!connectedLower.includes(ownerLower)) {
+        $("ownerGuardMsg").textContent = `Owner ${owner} is not connected. Click "Pick Accounts" and include it.`;
+        return alert(`Owner account is not connected to this site.\nClick "Pick Accounts" and select:\n${owner}`);
+      }
+
+      const addr = ($("ownerStationAddr").value||"").trim();
+      const priceEth = ($("ownerStationPrice").value||"").trim();
+      if (!ethers.utils.isAddress(addr)) return alert("Invalid station address.");
+      if (!priceEth) return alert("Enter price (ETH).");
+
+      $("ok").textContent = "Setting station... waiting for tx";
+      setBusy($("btnOwnerSetStation"), true);
+
+      // Request MetaMask to sign from the owner address (no UI reload)
+      const ownerSigner = provider.getSigner(owner);
+      const tx = await contract.connect(ownerSigner).setStation(addr, true, ethers.utils.parseEther(priceEth));
+      await tx.wait();
+
+      $("ok").textContent = "Station registered/updated.";
+      $("inpStation").value = addr;
+      LS.set("inpStation", addr);
+      await loadStationInfo();
+    } catch (e) {
+      console.error(e);
+      alert(fmtErr(e) || "setStation failed");
+    } finally {
+      setBusy($("btnOwnerSetStation"), false);
+      await applyOwnerGuard().catch(()=>{});
+    }
+  }
+
+  // ---------- Start Session ----------
+  function persistInputs() {
+    LS.set("inpStation", $("inpStation").value || "");
+    LS.set("inpQuoteId", $("inpQuoteId").value || "");
+    LS.set("inpUpfrontEth", $("inpUpfrontEth").value || "");
+    LS.set("inpDriver", $("inpDriver").value || "");
+  }
+
+  async function startSession() {
+    if (!contract) return alert("Connect first.");
+    persistInputs();
+    const btn = $("btnStart");
+    try {
+      setBusy(btn, true);
+      const station = ($("inpStation").value || "").trim();
+      if (!isAddr(station)) return alert("Enter a valid Station address (0x…).");
+      const okStation = await contract.isStation(station);
+      if (!okStation) return alert(`Station ${station} is not registered/allowed. Switch to the OWNER and click "Register/Update Station" first.`);
+
+      const sessionIdInput = $("inpQuoteId").value || "session-1";
+      const sessionId = toBytes32FromInput(sessionIdInput);
+      const upfrontEth = $("inpUpfrontEth").value.trim() || "0";
+      const valueWei = safeParseEther(upfrontEth);
+      if (!valueWei) return alert("Invalid deposit amount.");
+      const minDep = await contract.minDepositWei();
+      if (valueWei.lt(minDep)) return alert(`Deposit too low. Need at least ${fmtETH(minDep)} ETH`);
+
+      setStatus("Starting session... waiting for tx...");
+      const tx = await contract.startSession(sessionId, station, { value: valueWei });
+      const rc = await tx.wait();
+      setStatus(`Session started. tx=${rc.transactionHash}`);
+
+      lastTxHash = rc.transactionHash;
+      if (rsaKeyPair) await encryptLast(); else $("encPreview").textContent = "Tx mined. Generate RSA keys and click 'Encrypt Last Tx'.";
+      await refreshOwnerAndBalances(); await listRecentEvents();
+    } catch (e) { console.error(e); alert(fmtErr(e) || "startSession failed"); }
+    finally { setBusy(btn, false); }
+  }
+
+  // ---------- Sign as Station (MetaMask only) ----------
+  async function signAsStation() {
+    if (!contract) return alert("Connect first.");
+    try {
+      setStatus("Reading session…");
+
+      const activeLower = await getActiveAccountLower();
+
+      // Use typed session id first; else auto-pick latest open for this station
+      let inputId = $("inpQuoteId").value || "session-1";
+      let sessionId = toBytes32FromInput(inputId);
+      let sess = await getSessionFromChain(sessionId);
+
+      if (!sess || !sess.open) {
+        setStatus("No open session for that ID. Searching recent sessions for this station…");
+        const fb = await findLatestOpenSessionForStation(activeLower);
+        if (!fb) {
+          setStatus("No open sessions found for the current station account.");
+          return alert("No open sessions found for this station account. Start a session first.");
+        }
+        sessionId = fb.sessionId;
+        sess = fb.session;
+        $("inpQuoteId").value = sessionId; // reflect actual bytes32 id
+      }
+
+      const stationAddr = (sess.station || "").toLowerCase();
+      const driverAddr  = sess.user;
+
+      $("inpStation").value = sess.station;
+      $("inpDriver").value  = driverAddr;
+
+      if (activeLower !== stationAddr) {
+        setStatus(`Selected (MM): ${await signer.getAddress()}  |  Required (session): ${sess.station}`);
+        return alert(`Switch MetaMask to the STATION account:\n${sess.station}\n\n(If you haven't, click "Pick Accounts" and include it.)`);
+      }
+
+      const net = await provider.getNetwork();
+      const chainId = Number(net.chainId);
+      const kWhStr = $("inpDelivered").value || "0";
+      const kWhMilli = ethers.BigNumber.from(Math.floor(Number(kWhStr) * 1000));
+
+      const sdata = {
+        user: driverAddr,
+        station: sess.station,
+        sessionId,
+        kWhMilli: kWhMilli.toString(),
+        chainId: String(chainId),
+        contractAddr: contract.address
+      };
+
+      setStatus("Signing as station…");
+      let sig;
+      try {
+        sig = await signer._signTypedData(
+          { name: DOMAIN_NAME, version: DOMAIN_VERSION, chainId, verifyingContract: contract.address },
+          {
+            SessionStop: [
+              { name: "user", type: "address" },
+              { name: "station", type: "address" },
+              { name: "sessionId", type: "bytes32" },
+              { name: "kWhMilli", type: "uint256" },
+              { name: "chainId", type: "uint256" },
+              { name: "contractAddr", type: "address" }
+            ]
+          },
+          sdata
+        );
+      } catch {
+        // Fallback for wallets that insist on raw RPC
+        sig = await window.ethereum.request({
+          method: "eth_signTypedData_v4",
+          params: [sess.station, JSON.stringify(buildStopTypedData(sdata, chainId))]
+        });
+      }
+
+      $("inpStationSig").value = sig;
+      setStatus("✅ Station signature ready. Switch to the driver account and click Stop.");
+    } catch (e) {
+      console.error(e);
+      alert(fmtErr(e) || "Signature failed.");
+      setStatus("Signature failed.");
+    }
+  }
+
+  // ---------- Stop Session (driver submits & pays gas) ----------
+  async function stopSession() {
+    if (!contract) return alert("Connect first.");
+    persistInputs();
+    const btn = $("btnStop");
+    try {
+      setBusy(btn, true);
+
+      const sessionId = toBytes32FromInput($("inpQuoteId").value || "session-1");
+      let driverAddr = ($("inpDriver").value || "").trim();
+      let stationAddr = ($("inpStation").value || "").trim();
+
+      const sess = await contract.sessions(sessionId);
+      if (!sess || sess.user === ethers.constants.AddressZero) return alert("No such session on-chain.");
+      if (!sess.open) return alert("Session already closed.");
+
+      if (!isAddr(driverAddr) || driverAddr.toLowerCase() !== sess.user.toLowerCase()) {
+        driverAddr = sess.user; $("inpDriver").value = driverAddr;
+      }
+      if (!isAddr(stationAddr) || stationAddr.toLowerCase() !== sess.station.toLowerCase()) {
+        stationAddr = sess.station; $("inpStation").value = stationAddr;
+      }
+
+      // Active must be the driver for Option A
+      const activeLower = await getActiveAccountLower();
+      if (activeLower !== driverAddr.toLowerCase()) return alert(`Switch MetaMask to the DRIVER account:\n${driverAddr}`);
+
+      const priceWei   = bn(sess.priceWeiPerKWh);
+      const depositWei = bn(sess.deposit);
+
+      const kWhStr   = $("inpDelivered").value || "0";
+      const kWhMilli = ethers.BigNumber.from(Math.floor(Number(kWhStr) * 1000));
+
+      const balBefore = await provider.getBalance(stationAddr);
+      const net = await provider.getNetwork();
+      const chainId = Number(net.chainId);
+
+      const sdata = {
+        user: driverAddr,
+        station: stationAddr,
+        sessionId,
+        kWhMilli: kWhMilli.toString(),
+        chainId: String(chainId),
+        contractAddr: contract.address
+      };
+
+      const stationSig = ($("inpStationSig").value || "").trim();
+      if (!stationSig || !stationSig.startsWith("0x")) return alert("Paste a valid station signature (use 'Sign as Station').");
+
+      setStatus("Driver submitting stopSession... waiting for tx...");
+      const overrides = {};
+      try { overrides.gasPrice = ethers.utils.parseUnits("1", "gwei"); } catch {}
+
+      const tx = await contract.stopSession(sdata, stationSig, overrides);
+      const rc = await tx.wait();
+
+      const balAfter   = await provider.getBalance(stationAddr);
+      const costWei    = priceWei.mul(kWhMilli).div(1000);
+
+      let payoutWei = null, refundWei = null;
+      for (const log of rc.logs) {
+        try {
+          const parsed = contract.interface.parseLog(log);
+          if (parsed.name === "SessionSettled") {
+            payoutWei = bn(parsed.args.paid ?? parsed.args[2]);
+            refundWei = bn(parsed.args.refund ?? parsed.args[3]);
+            break;
+          }
+        } catch {}
+      }
+      if (payoutWei === null) payoutWei = depositWei.gte(costWei) ? costWei : depositWei;
+      if (refundWei === null) {
+        const r = depositWei.sub(costWei);
+        refundWei = r.lt(ethers.constants.Zero) ? bn(0) : r;
+      }
+
+      const stationDelta = balAfter.sub(balBefore);
+      renderStopSummary({
+        sessionId, kWhMilli, priceWei, costWei, depositWei,
+        refundWei, payoutWei, stationDelta,
+        balBefore, balAfter, txHash: rc.transactionHash
+      });
+
+      lastTxHash = rc.transactionHash;
+      if (rsaKeyPair) await encryptLast();
+      await refreshOwnerAndBalances();
+      await refreshUserWalletBalance();
+      await listRecentEvents();
+    } catch (e) { console.error(e); alert(fmtErr(e) || "stopSession failed"); }
+    finally { setBusy(btn, false); }
+  }
+
+  // ---------- Test Tx ----------
+  async function sendTestTx() {
+    try {
+      if (!provider || !contract) return alert("Connect first.");
+      setBusy($("btnTestTx"), true);
+      const tx = await signer.sendTransaction({ to: contract.address, value: ethers.utils.parseEther("0.000001") });
+      const rc = await tx.wait();
+      $("txStatus").textContent = `Mined: ${rc.transactionHash}`;
+      lastTxHash = rc.transactionHash;
+      if (rsaKeyPair) await encryptLast(); else $("encPreview").textContent = "Tx mined. Generate RSA keys and click 'Encrypt Last Tx'.";
+      await refreshOwnerAndBalances();
+    } catch (e) { console.error(e); $("txStatus").textContent = fmtErr(e) || "Test tx failed (ensure contract is payable)."; }
+    finally { setBusy($("btnTestTx"), false); }
+  }
+
+  // ---------- Withdraw ----------
+  async function withdrawFunds() { alert("No withdraw in this contract. Payout/refund happen in stopSession."); }
+
+  // ---------- RSA demo ----------
+  async function generateRSAKeys() {
+    rsaKeyPair = await window.crypto.subtle.generateKey(
+      { name: "RSA-OAEP", modulusLength: 2048, publicExponent: new Uint8Array([1,0,1]), hash: "SHA-256" },
+      true, ["encrypt","decrypt"]
+    );
+    $("keyStatus").textContent = "RSA keys ready";
+    $("btnDecrypt").disabled = false; $("btnEncryptLast").disabled = false;
+    $("encPreview").textContent = ""; $("decPreview").textContent = "";
+  }
+  async function encryptLast() {
+    if (!lastTxHash) return alert("No recent tx hash captured yet.");
+    if (!rsaKeyPair) return alert("Generate RSA keys first.");
+    const enc = await window.crypto.subtle.encrypt({ name: "RSA-OAEP" }, rsaKeyPair.publicKey, new TextEncoder().encode(lastTxHash));
+    lastEncrypted = enc; $("encPreview").textContent = `Encrypted (preview): ${toHexPreview(enc)}`; $("decPreview").textContent = "";
+  }
+  async function decryptLast() {
+    if (!rsaKeyPair || !lastEncrypted) return alert("No keys or no encrypted blob yet.");
+    try {
+      const decrypted = await window.crypto.subtle.decrypt({ name: "RSA-OAEP" }, rsaKeyPair.privateKey, lastEncrypted);
+      $("decPreview").textContent = "Decrypted tx hash: " + new TextDecoder().decode(decrypted);
+    } catch (e) { console.error(e); $("decPreview").textContent = "Decryption failed."; }
+  }
+
+  // ---------- Wire UI ----------
+  $("btnConnect").onclick = connect;
+  $("btnPick").onclick = pickAccounts;
+  $("btnFix").onclick = fixNetwork;
+  $("btnStart").onclick = startSession;
+  $("btnStop").onclick = stopSession;
+  $("btnWithdraw").onclick = withdrawFunds;
+  $("btnGenKeys").onclick = generateRSAKeys;
+  $("btnEncryptLast").onclick = encryptLast;
+  $("btnDecrypt").onclick = decryptLast;
+  $("btnTestTx").onclick = sendTestTx;
+  $("btnLoadStation").onclick = loadStationInfo;
+  $("btnOwnerSetStation").onclick = ownerSetStation;
+  $("btnRefreshEvents").onclick = listRecentEvents;
+  $("btnSignAsStation").onclick = signAsStation;
+
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.classList.contains("copy")) {
+      const id = t.getAttribute("data-copy");
+      const txt = $(id)?.textContent?.trim() || "";
+      if (txt) navigator.clipboard.writeText(txt);
+    }
+  });
+  </script>
+</body>
+</html>
